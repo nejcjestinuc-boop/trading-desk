@@ -157,7 +157,7 @@ for t in trades:
     sl = float(t.get("sl_now") or t.get("sl") or 0)
     sl0 = float(t.get("sl") or 0)
     tp1 = t.get("tp1")
-    if not (sym and side and entry and sl0):
+    if not (sym and side and entry):
         continue
     try:
         if sym not in cache:
@@ -172,6 +172,40 @@ for t in trades:
         t0 = calendar.timegm(time.strptime(created[:16], "%Y-%m-%dT%H:%M"))
     except Exception:
         t0 = m15[-60]["t"]
+    # proposal for a manual trade without SL or TP: SL beyond the last 1H swing before entry,
+    # TP1 at the nearest higher-timeframe level at least 2R away (else 4R), full TP further out
+    proposal = None
+    if not sl0 or not tp1:
+        try:
+            if sym not in lv_cache:
+                d1 = klines(sym, "1d", 400); w1 = klines(sym, "1w", 60)
+                lv_cache[sym] = htf_levels(d1, w1, h1, now) + extra_htf_levels(closed(d1, now), w1, now)
+            before = [c for c in h1 if c["t"] < t0] or h1
+            ph_, pl_ = pivots(before, 3)
+            if sl0:
+                p_sl = sl0
+            else:
+                cand = [before[i]["l"] for i in pl_ if before[i]["l"] < entry] if long else [before[i]["h"] for i in ph_ if before[i]["h"] > entry]
+                p_sl = (cand[-1] if cand else (min(c["l"] for c in before[-24:]) if long else max(c["h"] for c in before[-24:])))
+                p_sl = p_sl * (0.999 if long else 1.001)
+            rk = abs(entry - p_sl)
+            if rk > 0:
+                lv = sorted({p for _, p, _ in lv_cache[sym] if ((p - entry) if long else (entry - p)) / rk >= 2}, key=lambda p: abs(p - entry))
+                p_tp1 = float(tp1) if tp1 else (lv[0] if lv else entry + (4 if long else -4) * rk)
+                r1 = abs(p_tp1 - entry) / rk
+                far = [p for p in lv if r1 * 1.6 <= abs(p - entry) / rk <= r1 * 3]
+                p_tp2 = far[0] if far else entry + (1 if long else -1) * 2 * r1 * rk
+                proposal = {"sl": rnd(p_sl, entry), "tp1": rnd(p_tp1, entry), "tp2": rnd(p_tp2, entry),
+                            "r1": round(r1, 1), "r2": round(abs(p_tp2 - entry) / rk, 1), "sl_given": bool(sl0), "tp_given": bool(tp1)}
+                if not sl0:
+                    sl0 = p_sl
+                    sl = sl or p_sl
+                if not tp1:
+                    tp1 = p_tp1
+        except Exception:
+            proposal = None
+    if not sl0:
+        continue
     since = [i for i, c in enumerate(m15) if c["t"] >= t0 - 3600]
     i0 = since[0] if since else len(m15) - 40
     price = m15[-1]["c"]
@@ -264,7 +298,7 @@ for t in trades:
         "tp1": tp1, "protect_level": rnd(prot_lvl, price) if prot_lvl else None,
         "structure_against": against, "structure_building": building, "trend_1h": trend_1h, "cvd_with": cvd_with,
         "vol_ratio": round(vol_ratio, 2), "vol_with": vol_with, "oi_with": oi_with,
-        "label": label, "notes": notes, "checked_at": iso(now), "room": room, "room_alert": room_alert,
+        "label": label, "notes": notes, "checked_at": iso(now), "room": room, "room_alert": room_alert, "proposal": proposal,
     }
 
 res["positions"] = positions
